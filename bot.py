@@ -2638,6 +2638,232 @@ async def setup(bot):
     await bot.add_cog(TicketAndStatsCog(bot))
 
 
+# ==================== MM INFO COMMAND (AUTO-IMAGE) ====================
+
+class MMInfoTrackingView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.understood_users = set()
+
+    @discord.ui.button(label="Understood", style=discord.ButtonStyle.green, custom_id="mm_info_understood_v1")
+    async def understood_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+        if user.bot:
+            return
+
+        if user.id in self.understood_users:
+            await interaction.response.send_message("✅ You have already clicked **Understood**!", ephemeral=True)
+            return
+
+        self.understood_users.add(user.id)
+        await interaction.response.send_message(f"✅ **{user.mention}** has chosen **Understood**. Middleman can continue!", ephemeral=False)
+
+        if len(self.understood_users) >= 2:
+            await interaction.channel.send(
+                "🎉 **Both traders have understood the working of middle man rules and the mm is ready to continue!** 🚀"
+            )
+
+    @discord.ui.button(label="Not Understood", style=discord.ButtonStyle.red, custom_id="mm_info_not_understood_v1")
+    async def not_understood_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+        if user.bot:
+            return
+
+        await interaction.response.send_message(
+            f"❌ **{user.mention}** has chosen **Not Understood** and needs further assistance from a Middleman.", 
+            ephemeral=False
+        )
+
+@bot.command(name="mminfo")
+async def mminfo(ctx):
+    # Optional security check for staff/middleman
+    if not (has_middleman_or_above(ctx.author) or ctx.author.guild_permissions.administrator):
+        await ctx.send("❌ You do not have permission to use this command.", delete_after=5)
+        return
+
+    image_path = "IMG_0077.png"
+    file = None
+    
+    # Check if the image file exists in the container folder
+    if os.path.exists(image_path):
+        file = discord.File(image_path, filename="IMG_0077.png")
+
+    embed = discord.Embed(
+        title="🛡️ GameBoost | MIDDLEMAN INFO & RULES",
+        description=(
+            "Please review our secure trading steps below:\n\n"
+            "• **Seller** gives the item/s to the middleman.\n"
+            "• **Buyer** gives the payment to the seller.\n"
+            "• **Middleman** gives the item/s to the buyer.\n"
+            "• Both traders must vouch the MiddleMan after use."
+        ),
+        color=discord.Color.from_rgb(255, 165, 0)
+    )
+
+    if file:
+        embed.set_image(url="attachment://IMG_0077.png")
+
+    embed.set_footer(text="👑 GameBoost Secure Trading • Safe & Trusted")
+
+    view = MMInfoTrackingView()
+
+    if file:
+        await ctx.send(file=file, embed=embed, view=view)
+    else:
+        await ctx.send(embed=embed, view=view)
+
+    # Clean up the user's $mminfo command message from chat
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+
+
+# ==================== INTERACTIVE FORM HITTER SYSTEM ($PREFIX) ====================
+
+class HitterSetupModal(discord.ui.Modal, title="Configure Hitter Announcement"):
+    role_input = discord.ui.TextInput(
+        label="Role Name, ID, or Mention",
+        placeholder="e.g., Hitter or @Hitter",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    channel_input = discord.ui.TextInput(
+        label="Channel Name, ID, or Mention",
+        placeholder="e.g., #hitter-logs or general",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    custom_message = discord.ui.TextInput(
+        label="Custom Announcement Message",
+        placeholder="🔥 {user} just earned the {role} role in {server}!",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        
+        # 1. Parse Role (supports name, ID, or mention format like <@&123...>)
+        r_query = self.role_input.value.strip().replace("<@&", "").replace(">", "")
+        role = None
+        if r_query.isdigit():
+            role = guild.get_role(int(r_query))
+        else:
+            role = discord.utils.find(lambda r: r_query.lower() in r.name.lower(), guild.roles)
+
+        # 2. Parse Channel (supports name, ID, or mention format like <#123...>)
+        c_query = self.channel_input.value.strip().replace("<#", "").replace(">", "")
+        channel = None
+        if c_query.isdigit():
+            channel = guild.get_channel(int(c_query))
+        else:
+            channel = discord.utils.find(lambda c: c_query.lower().replace("#", "") in c.name.lower() and isinstance(c, discord.TextChannel), guild.text_channels)
+
+        if not role:
+            await interaction.response.send_message(f"❌ Could not find a role matching **'{self.role_input.value}'**!", ephemeral=True)
+            return
+        if not channel:
+            await interaction.response.send_message(f"❌ Could not find a channel matching **'{self.channel_input.value}'**!", ephemeral=True)
+            return
+
+        # 3. Save configuration into guild_config.json
+        config = load_config()
+        guild_id = str(guild.id)
+        if guild_id not in config:
+            config[guild_id] = {}
+
+        config[guild_id]["hitter"] = {
+            "role_id": role.id,
+            "channel_id": channel.id,
+            "message": self.custom_message.value
+        }
+        save_config(config)
+
+        # 4. Confirmation embed back to the admin
+        embed = discord.Embed(
+            title="✅ Hitter System Configured Successfully",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Target Role", value=role.mention, inline=True)
+        embed.add_field(name="Announcement Channel", value=channel.mention, inline=True)
+        embed.add_field(name="Custom Message", value=self.custom_message.value, inline=False)
+        embed.set_footer(text="Placeholders available: {user}, {username}, {role}, {server}")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class HitterButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None) # Persistent view so it never breaks
+
+    @discord.ui.button(label="Open Hitter Setup Form", style=discord.ButtonStyle.primary, emoji="📝", custom_id="open_hitter_modal_btn_v1")
+    async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ You need **Administrator** permissions to use this setup form.", ephemeral=True)
+            return
+        await interaction.response.send_modal(HitterSetupModal())
+
+@bot.command(name="hitter")
+@commands.has_permissions(administrator=True)
+async def hitter(ctx):
+    """Usage: $hitter -> Opens button to launch the configuration form."""
+    embed = discord.Embed(
+        title="⚙️ GameBoost | Hitter System Setup",
+        description="Click the button below to open the form and configure your custom Hitter role, channel, and announcement message.",
+        color=discord.Color.blue()
+    )
+    view = HitterButtonView()
+    await ctx.send(embed=embed, view=view)
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+
+@hitter.error
+async def hitter_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You need **Administrator** permissions to use `$hitter`.")
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # Check if roles changed
+    if before.roles == after.roles:
+        return
+
+    added_roles = [r for r in after.roles if r not in before.roles]
+    if not added_roles:
+        return
+
+    config = load_config()
+    hitter_cfg = config.get(str(after.guild.id), {}).get("hitter")
+    if not hitter_cfg:
+        return
+
+    target_role_id = hitter_cfg.get("role_id")
+    target_channel_id = hitter_cfg.get("channel_id")
+    raw_message = hitter_cfg.get("message")
+
+    for role in added_roles:
+        if role.id == target_role_id:
+            channel = after.guild.get_channel(target_channel_id)
+            if channel:
+                # Format text placeholders
+                formatted_msg = (
+                    raw_message.replace("{user}", after.mention)
+                               .replace("{username}", after.name)
+                               .replace("{role}", role.name)
+                               .replace("{server}", after.guild.name)
+                )
+                try:
+                    # Auto-ping the user if {user} wasn't explicitly written in the custom message
+                    content = formatted_msg if after.mention in formatted_msg else f"{after.mention} {formatted_msg}"
+                    await channel.send(content)
+                except discord.Forbidden:
+                    print(f"❌ Missing permissions to send hitter message in #{channel.name}")
+            break
+
+
 
 
 
