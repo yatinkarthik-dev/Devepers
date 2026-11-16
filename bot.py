@@ -2864,6 +2864,214 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             break
 
 
+# ==================== FLOP REGISTER & INTERACTIVE FLOW ====================
+
+class FlopRegisterModal(discord.ui.Modal, title="Register Flop Embed Message"):
+    embed_text = discord.ui.TextInput(
+        label="Embed Message Text",
+        placeholder="Enter the message to display. Use {user} to mention the target.",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        config = load_config()
+        guild_id = str(interaction.guild.id)
+        if guild_id not in config:
+            config[guild_id] = {}
+
+        config[guild_id]["flop_message"] = self.embed_text.value
+        save_config(config)
+
+        await interaction.response.send_message(
+            "✅ **Flop embed message has been saved!** Middlemen can now use `$flop @user`.",
+            ephemeral=True
+        )
+
+class FlopRegisterButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Configure Flop Message", style=discord.ButtonStyle.primary, emoji="📝", custom_id="flop_register_btn_v1")
+    async def open_register_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Only **Administrators** can configure this message.", ephemeral=True)
+            return
+        await interaction.response.send_modal(FlopRegisterModal())
+
+@bot.command(name="flopregister")
+@commands.has_permissions(administrator=True)
+async def flopregister(ctx):
+    """Usage: $flopregister -> Opens button to set the custom $flop embed message."""
+    embed = discord.Embed(
+        title="⚙️ GameBoost | Flop Message Registration",
+        description="Click the button below to set the custom embed text that will appear when `$flop @user` is used.",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed, view=FlopRegisterButtonView())
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+
+@flopregister.error
+async def flopregister_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You need **Administrator** permissions to use `$flopregister`.")
+
+# --- RULES FORM MODAL ---
+class FlopRulesModal(discord.ui.Modal, title="Server Rules Agreement"):
+    answer = discord.ui.TextInput(
+        label="Will you follow our rules listed in #rules?",
+        placeholder="Type 'yes' or 'no'",
+        style=discord.TextStyle.short,
+        required=True,
+        max_length=10
+    )
+
+    def __init__(self, target_user_id: int):
+        super().__init__()
+        self.target_user_id = target_user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        user_response = self.answer.value.strip().lower()
+
+        if user_response == "yes":
+            role = discord.utils.find(lambda r: "gameboost family" in r.name.lower(), guild.roles)
+            if role:
+                try:
+                    await interaction.user.add_roles(role)
+                    await interaction.response.send_message(
+                        f"✅ {interaction.user.mention} agreed to the rules and has been granted the **{role.name}** role!",
+                        ephemeral=False
+                    )
+                except discord.Forbidden:
+                    await interaction.response.send_message(
+                        "❌ I don't have permission to assign the **GameBoost family** role. Check my role hierarchy!",
+                        ephemeral=True
+                    )
+            else:
+                await interaction.response.send_message(
+                    "❌ Could not find a role named **GameBoost family** in this server.",
+                    ephemeral=True
+                )
+        else:
+            mm_role = discord.utils.find(lambda r: "middleman" in r.name.lower() or "mm" == r.name.lower(), guild.roles)
+            mm_ping = mm_role.mention if mm_role else "**Middleman**"
+            await interaction.response.send_message(
+                f"⚠️ {interaction.user.mention} answered **{self.answer.value}** to the rules agreement. {mm_ping}, please guide them!",
+                ephemeral=False
+            )
+
+# --- BAN CONFIRMATION VIEW FOR MM ---
+class FlopBanConfirmView(discord.ui.View):
+    def __init__(self, target_user: discord.Member):
+        super().__init__(timeout=120)
+        self.target_user = target_user
+
+    @discord.ui.button(label="Yes, Confirm Ban", style=discord.ButtonStyle.danger, emoji="🔨")
+    async def confirm_ban(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Verify the clicker is a Middleman or Admin
+        if not (has_middleman_or_above(interaction.user) or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Only a **Middleman** or **Admin** can confirm this ban.", ephemeral=True)
+            return
+
+        try:
+            await self.target_user.ban(reason=f"Requested 'Ban Me' via $flop (Confirmed by {interaction.user})")
+            await interaction.response.edit_message(
+                content=f"🔨 **{self.target_user}** has been banned (Confirmed by {interaction.user.mention}).",
+                view=None
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I lack permissions to ban this user (check role hierarchy).", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to ban user: `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_ban(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not (has_middleman_or_above(interaction.user) or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Only a **Middleman** or **Admin** can cancel this.", ephemeral=True)
+            return
+
+        await interaction.response.edit_message(content="✅ Ban request cancelled.", view=None)
+
+# --- MAIN ACTION VIEW (JOIN / BAN ME) ---
+class FlopActionView(discord.ui.View):
+    def __init__(self, target_user: discord.Member):
+        super().__init__(timeout=None)
+        self.target_user = target_user
+
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.success, emoji="✅")
+    async def join_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user.id:
+            await interaction.response.send_message("❌ Only the tagged user can click this button.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(FlopRulesModal(target_user_id=self.target_user.id))
+
+    @discord.ui.button(label="Ban Me", style=discord.ButtonStyle.danger, emoji="🔨")
+    async def ban_me_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user.id:
+            await interaction.response.send_message("❌ Only the tagged user can click this button.", ephemeral=True)
+            return
+
+        mm_role = discord.utils.find(lambda r: "middleman" in r.name.lower() or "mm" == r.name.lower(), interaction.guild.roles)
+        mm_ping = mm_role.mention if mm_role else "Middleman"
+
+        await interaction.response.send_message(
+            content=f"⚠️ {mm_ping}, **{self.target_user.mention}** selected **Ban Me**. Confirm ban?",
+            view=FlopBanConfirmView(target_user=self.target_user)
+        )
+
+# --- $FLOP COMMAND ---
+@bot.command(name="flop")
+async def flop(ctx, member: discord.Member):
+    """Usage: $flop @user"""
+    if not (has_middleman_or_above(ctx.author) or ctx.author.guild_permissions.administrator):
+        await ctx.send("❌ Only Middlemen or Administrators can use `$flop`.", delete_after=5)
+        return
+
+    config = load_config()
+    saved_msg = config.get(str(ctx.guild.id), {}).get("flop_message")
+
+    if not saved_msg:
+        await ctx.send("⚠️ No message is registered yet! An admin must run `$flopregister` first.", delete_after=7)
+        return
+
+    formatted_text = saved_msg.replace("{user}", member.mention).replace("{username}", member.name)
+
+    image_path = "IMG_008.png"
+    file = discord.File(image_path, filename="IMG_008.png") if os.path.exists(image_path) else None
+
+    embed = discord.Embed(
+        title="📢 GameBoost | Notice",
+        description=formatted_text,
+        color=discord.Color.from_rgb(255, 69, 0)
+    )
+    if file:
+        embed.set_image(url="attachment://IMG_008.png")
+
+    embed.set_footer(text="GameBoost • Choose an option below")
+
+    view = FlopActionView(target_user=member)
+
+    if file:
+        await ctx.send(content=member.mention, file=file, embed=embed, view=view)
+    else:
+        await ctx.send(content=member.mention, embed=embed, view=view)
+
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+
+@flop.error
+async def flop_error(ctx, error):
+    if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+        await ctx.send("❌ **Invalid Usage!** Use: `$flop @user`", delete_after=5)
+
 
 
 
