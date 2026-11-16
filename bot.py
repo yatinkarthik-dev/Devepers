@@ -15,7 +15,7 @@ intents.message_content = True
 intents.members = True
 intents.invites = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='$', intents=intents)
 
 # =================== EMOJI-SAFE HELPER FUNCTIONS ====================
 
